@@ -1,0 +1,32 @@
+{
+  "expo": {
+    "name": "SwingLab",
+    "slug": "swinglab",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "scheme": "swinglab",
+    "platforms": ["ios", "android"],
+    "plugins": [
+      "expo-router",
+      "expo-video",
+      "expo-sqlite"
+    ],
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.tier4.swinglab",
+      "infoPlist": {
+        "NSCameraUsageDescription": "SwingLab needs camera access to capture baseball swings.",
+        "NSPhotoLibraryUsageDescription": "SwingLab needs photo library access to import swing videos."
+      }
+    },
+    "android": {
+      "package": "com.tier4.swinglab",
+      "permissions": ["CAMERA", "READ_EXTERNAL_STORAGE"]
+    },
+    "extra": {
+      "router": {
+        "origin": false
+      }
+    }
+  }
+}
