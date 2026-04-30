@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { StyleSheet, View, Text, TouchableOpacity, ScrollView } from "react-native";
 import { VideoView, useVideoPlayer } from "expo-video";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
@@ -86,6 +86,7 @@ export default function CompareScreen() {
 
   const progress = useSharedValue(0);
   const trackWidthValue = useSharedValue(1);
+  const seekToProgressRef = useRef<(nextProgress: number) => void>(() => {});
 
   const proPlayer = useVideoPlayer(selectedPro.src, (player) => {
     player.loop = false;
@@ -112,19 +113,6 @@ export default function CompareScreen() {
   const scrubPhase = currentPhase(scrubProgress);
   const activeMarkedPhases = activeSide === "pro" ? proMarkedPhases : playerMarkedPhases;
 
-  const seekUnlocked = useCallback(
-    (nextProgress: number) => {
-      const next = clamp(nextProgress);
-      setScrubProgress(next);
-      if (activeSide === "pro") {
-        seekPlayer(selectedPro, proPlayer, next);
-      } else {
-        seekPlayer(selectedYouth, youthPlayer, next);
-      }
-    },
-    [activeSide, proPlayer, selectedPro, selectedYouth, youthPlayer]
-  );
-
   const seekLocked = useCallback(
     (nextProgress: number) => {
       if (!proPhaseMarkers || !playerPhaseMarkers) {
@@ -141,16 +129,30 @@ export default function CompareScreen() {
     [playerPhaseMarkers, proPhaseMarkers, proPlayer, selectedPro.fps, selectedYouth.fps, youthPlayer]
   );
 
-  const seekToProgress = useCallback(
+  const seekFromGesture = useCallback(
     (nextProgress: number) => {
+      seekToProgressRef.current(nextProgress);
+    },
+    []
+  );
+
+  useEffect(() => {
+    seekToProgressRef.current = (nextProgress: number) => {
+      const next = clamp(nextProgress);
+
       if (locked) {
-        seekLocked(nextProgress);
+        seekLocked(next);
         return;
       }
-      seekUnlocked(nextProgress);
-    },
-    [locked, seekLocked, seekUnlocked]
-  );
+
+      setScrubProgress(next);
+      if (activeSide === "pro") {
+        seekPlayer(selectedPro, proPlayer, next);
+      } else {
+        seekPlayer(selectedYouth, youthPlayer, next);
+      }
+    };
+  }, [activeSide, locked, proPlayer, seekLocked, selectedPro, selectedYouth, youthPlayer]);
 
   useEffect(() => {
     progress.value = 0;
@@ -204,17 +206,42 @@ export default function CompareScreen() {
     () =>
       Gesture.Pan()
         .minDistance(0)
-        .onBegin((event) => {
-          const next = clamp((event.x - TRACK_INSET) / Math.max(1, trackWidthValue.value - TRACK_INSET * 2));
+        .onTouchesDown((event) => {
+          const touch = event.allTouches[0] ?? event.changedTouches[0];
+          if (!touch) {
+            return;
+          }
+
+          const next = clamp((touch.x - TRACK_INSET) / Math.max(1, trackWidthValue.value - TRACK_INSET * 2));
           progress.value = next;
-          runOnJS(seekToProgress)(next);
+          runOnJS(seekFromGesture)(next);
+        })
+        .onTouchesMove((event) => {
+          const touch = event.allTouches[0] ?? event.changedTouches[0];
+          if (!touch) {
+            return;
+          }
+
+          const next = clamp((touch.x - TRACK_INSET) / Math.max(1, trackWidthValue.value - TRACK_INSET * 2));
+          progress.value = next;
+          runOnJS(seekFromGesture)(next);
+        })
+        .onTouchesUp((event) => {
+          const touch = event.allTouches[0] ?? event.changedTouches[0];
+          if (!touch) {
+            return;
+          }
+
+          const next = clamp((touch.x - TRACK_INSET) / Math.max(1, trackWidthValue.value - TRACK_INSET * 2));
+          progress.value = next;
+          runOnJS(seekFromGesture)(next);
         })
         .onUpdate((event) => {
           const next = clamp((event.x - TRACK_INSET) / Math.max(1, trackWidthValue.value - TRACK_INSET * 2));
           progress.value = next;
-          runOnJS(seekToProgress)(next);
+          runOnJS(seekFromGesture)(next);
         }),
-    [progress, seekToProgress, trackWidthValue]
+    [progress, seekFromGesture, trackWidthValue]
   );
 
   const thumbStyle = useAnimatedStyle(() => {
@@ -259,7 +286,7 @@ export default function CompareScreen() {
 
       <View style={styles.videoStack}>
         <VideoPanel
-          active={!locked && activeSide === "pro"}
+          active={activeSide === "pro"}
           flipped={proFlipped}
           markedCount={proMarkedPhases.size}
           onFlip={() => setProFlipped((value) => !value)}
@@ -273,7 +300,7 @@ export default function CompareScreen() {
         />
 
         <VideoPanel
-          active={!locked && activeSide === "player"}
+          active={activeSide === "player"}
           flipped={playerFlipped}
           markedCount={playerMarkedPhases.size}
           onFlip={() => setPlayerFlipped((value) => !value)}
@@ -379,7 +406,7 @@ function VideoPanel({
     <TouchableOpacity
       activeOpacity={0.95}
       onPress={onPress}
-      style={[styles.videoPanel, active && styles.videoPanelActive]}
+      style={[styles.videoPanel, active ? styles.videoPanelActive : styles.videoPanelInactive]}
     >
       <View style={[styles.videoMirrorLayer, flipped && styles.videoFlipped]}>
         <VideoView
@@ -393,12 +420,14 @@ function VideoPanel({
       </View>
 
       <View style={styles.topOverlay}>
-        <View style={styles.glassBadge}>
-          <Text style={styles.badgeKicker}>{sideLabel}</Text>
-          <Text style={styles.badgeTitle} numberOfLines={1}>{video.label}</Text>
+        <View style={styles.videoLabelStack}>
+          <View style={styles.sideBadge}>
+            <Text style={styles.sideBadgeText}>{sideLabel}</Text>
+          </View>
+          <Text style={styles.videoName} numberOfLines={1}>{video.label}</Text>
         </View>
 
-        <View style={styles.badgeRow}>
+        <View style={styles.headerActions}>
           <View style={styles.iconBadge}>
             <Text style={styles.iconBadgeText}>{video.handedness}H</Text>
           </View>
@@ -496,12 +525,16 @@ const styles = StyleSheet.create({
     backgroundColor: "#111315",
     borderColor: "rgba(247,248,248,0.08)",
     borderRadius: 8,
-    borderWidth: 1,
+    borderWidth: 2,
     flex: 1,
     overflow: "hidden",
   },
   videoPanelActive: {
     borderColor: ACCENT,
+  },
+  videoPanelInactive: {
+    borderColor: "rgba(247,248,248,0.05)",
+    opacity: 0.4,
   },
   videoMirrorLayer: {
     ...StyleSheet.absoluteFillObject,
@@ -516,35 +549,49 @@ const styles = StyleSheet.create({
   topOverlay: {
     alignItems: "flex-start",
     flexDirection: "row",
+    gap: 12,
     justifyContent: "space-between",
     left: 12,
     position: "absolute",
     right: 12,
     top: 12,
   },
-  glassBadge: {
-    backgroundColor: "rgba(8,9,10,0.54)",
-    borderColor: "rgba(247,248,248,0.18)",
-    borderRadius: 8,
-    borderWidth: 1,
-    maxWidth: "62%",
-    paddingHorizontal: 12,
-    paddingVertical: 9,
+  videoLabelStack: {
+    alignItems: "flex-start",
+    flex: 1,
+    gap: 5,
+    minWidth: 0,
   },
-  badgeKicker: {
-    color: ACCENT,
+  sideBadge: {
+    alignItems: "center",
+    backgroundColor: ACCENT,
+    borderRadius: 6,
+    justifyContent: "center",
+    minHeight: 24,
+    paddingHorizontal: 9,
+  },
+  sideBadgeText: {
+    color: "#08090a",
     fontSize: 10,
     fontWeight: "900",
   },
-  badgeTitle: {
+  videoName: {
+    backgroundColor: "rgba(8,9,10,0.58)",
+    borderColor: "rgba(247,248,248,0.14)",
+    borderRadius: 6,
+    borderWidth: 1,
     color: "#f7f8f8",
-    fontSize: 14,
+    fontSize: 12,
     fontWeight: "800",
-    marginTop: 2,
+    maxWidth: "100%",
+    overflow: "hidden",
+    paddingHorizontal: 9,
+    paddingVertical: 5,
   },
-  badgeRow: {
+  headerActions: {
     flexDirection: "row",
     gap: 8,
+    marginLeft: "auto",
   },
   iconBadge: {
     alignItems: "center",
