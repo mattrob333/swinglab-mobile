@@ -349,7 +349,12 @@ export default function CompareScreen() {
             onLayout={(event) => setTrackWidth(event.nativeEvent.layout.width)}
           >
             <Animated.View style={[styles.phaseFloatingLabel, floatingLabelStyle]}>
-              <Text style={styles.phaseFloatingText}>{PHASE_LABELS[scrubPhase]}</Text>
+              <Text style={styles.phaseFloatingText}>
+                {locked
+                  ? PHASE_LABELS[scrubPhase]
+                  : `Frame ${Math.round(scrubProgress * (activeSide === "pro" ? selectedPro.totalFrames : selectedYouth.totalFrames))}`
+                }
+              </Text>
             </Animated.View>
 
             <View style={styles.track}>
