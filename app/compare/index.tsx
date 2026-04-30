@@ -20,6 +20,7 @@ import {
 } from "../../src/lib/swing-phases";
 
 type Side = "pro" | "player";
+type TaggingPhase = "trimming_start" | "trimming_end" | "tagging" | "locked";
 type ProgressMarkers = Partial<Record<Phase, number>>;
 
 const ACCENT = "#C8F000";
@@ -67,11 +68,19 @@ function seekPlayer(video: SwingVideoInfo, player: ReturnType<typeof useVideoPla
   player.currentTime = seconds;
 }
 
+function remapSwingProgress(progress: number, swingStart: number, swingEnd: number) {
+  const start = clamp(swingStart);
+  const end = Math.max(start, clamp(swingEnd));
+  return start + clamp(progress) * (end - start);
+}
+
 export default function CompareScreen() {
   const [selectedProIndex, setSelectedProIndex] = useState(0);
   const [selectedYouthIndex, setSelectedYouthIndex] = useState(0);
   const [activeSide, setActiveSide] = useState<Side>("player");
-  const [locked, setLocked] = useState(false);
+  const [taggingPhase, setTaggingPhase] = useState<TaggingPhase>("trimming_start");
+  const [swingStart, setSwingStart] = useState(0);
+  const [swingEnd, setSwingEnd] = useState(1);
   const [scrubProgress, setScrubProgress] = useState(0);
   const [proFlipped, setProFlipped] = useState(false);
   const [playerFlipped, setPlayerFlipped] = useState(false);
@@ -110,8 +119,12 @@ export default function CompareScreen() {
   );
 
   const canLock = proMarkedPhases.size === PHASES.length && playerMarkedPhases.size === PHASES.length;
+  const locked = taggingPhase === "locked";
+  const trimming = taggingPhase === "trimming_start" || taggingPhase === "trimming_end";
   const scrubPhase = currentPhase(scrubProgress);
   const activeMarkedPhases = activeSide === "pro" ? proMarkedPhases : playerMarkedPhases;
+  const activeVideo = activeSide === "pro" ? selectedPro : selectedYouth;
+  const activePlayer = activeSide === "pro" ? proPlayer : youthPlayer;
 
   const seekLocked = useCallback(
     (nextProgress: number) => {
@@ -146,13 +159,16 @@ export default function CompareScreen() {
       }
 
       setScrubProgress(next);
+      const seekProgress =
+        taggingPhase === "tagging" ? remapSwingProgress(next, swingStart, swingEnd) : next;
+
       if (activeSide === "pro") {
-        seekPlayer(selectedPro, proPlayer, next);
+        seekPlayer(selectedPro, proPlayer, seekProgress);
       } else {
-        seekPlayer(selectedYouth, youthPlayer, next);
+        seekPlayer(selectedYouth, youthPlayer, seekProgress);
       }
     };
-  }, [activeSide, locked, proPlayer, seekLocked, selectedPro, selectedYouth, youthPlayer]);
+  }, [activeSide, locked, proPlayer, seekLocked, selectedPro, selectedYouth, swingEnd, swingStart, taggingPhase, youthPlayer]);
 
   useEffect(() => {
     progress.value = 0;
@@ -176,7 +192,7 @@ export default function CompareScreen() {
         return;
       }
 
-      const nextProgress = scrubProgress;
+      const nextProgress = remapSwingProgress(scrubProgress, swingStart, swingEnd);
       if (activeSide === "pro") {
         setProMarkers((previous) => ({ ...previous, [phase]: nextProgress }));
         setProMarkedPhases((previous) => new Set(previous).add(phase));
@@ -186,7 +202,7 @@ export default function CompareScreen() {
       setPlayerMarkers((previous) => ({ ...previous, [phase]: nextProgress }));
       setPlayerMarkedPhases((previous) => new Set(previous).add(phase));
     },
-    [activeSide, locked, scrubProgress]
+    [activeSide, locked, scrubProgress, swingEnd, swingStart]
   );
 
   const toggleLock = useCallback(() => {
@@ -195,12 +211,28 @@ export default function CompareScreen() {
     }
 
     const nextLocked = !locked;
-    setLocked(nextLocked);
+    setTaggingPhase(nextLocked ? "locked" : "tagging");
     if (!nextLocked) {
       return;
     }
     seekLocked(scrubProgress);
   }, [canLock, locked, scrubProgress, seekLocked]);
+
+  const setStanceStart = useCallback(() => {
+    const nextStart = clamp(scrubProgress);
+    setSwingStart(nextStart);
+    setSwingEnd((previousEnd) => Math.max(nextStart, previousEnd));
+    setTaggingPhase("trimming_end");
+  }, [scrubProgress]);
+
+  const setFinishEnd = useCallback(() => {
+    const nextEnd = Math.max(swingStart, clamp(scrubProgress));
+    setSwingEnd(nextEnd);
+    setScrubProgress(0);
+    progress.value = 0;
+    seekPlayer(activeVideo, activePlayer, swingStart);
+    setTaggingPhase("tagging");
+  }, [activePlayer, activeVideo, progress, scrubProgress, swingStart]);
 
   const scrubGesture = useMemo(
     () =>
@@ -251,13 +283,6 @@ export default function CompareScreen() {
     };
   });
 
-  const floatingLabelStyle = useAnimatedStyle(() => {
-    const usableWidth = Math.max(1, trackWidthValue.value - TRACK_INSET * 2);
-    return {
-      transform: [{ translateX: TRACK_INSET + usableWidth * progress.value - 42 }],
-    };
-  });
-
   const fillStyle = useAnimatedStyle(() => ({
     width: TRACK_INSET + Math.max(1, trackWidthValue.value - TRACK_INSET * 2) * progress.value,
   }));
@@ -269,19 +294,14 @@ export default function CompareScreen() {
           <Text style={styles.logo}>
             Swing<Text style={styles.logoDim}>Lab</Text>
           </Text>
-          <Text style={styles.subtitle}>{locked ? "Phase sync locked" : `Marking ${activeSide === "pro" ? "pro" : "player"} phases`}</Text>
-        </View>
-
-        <TouchableOpacity
-          activeOpacity={0.85}
-          onPress={toggleLock}
-          disabled={!locked && !canLock}
-          style={[styles.lockButton, locked && styles.lockButtonActive, !locked && !canLock && styles.lockButtonDisabled]}
-        >
-          <Text style={[styles.lockButtonText, locked && styles.lockButtonTextActive]}>
-            {locked ? "Unlock" : "Lock Sync"}
+          <Text style={styles.subtitle}>
+            {locked
+              ? "Phase sync locked"
+              : trimming
+                ? "Set swing trim range"
+                : `Tagging ${activeSide === "pro" ? "pro" : "player"} phases`}
           </Text>
-        </TouchableOpacity>
+        </View>
       </View>
 
       <View style={styles.videoStack}>
@@ -315,51 +335,87 @@ export default function CompareScreen() {
       </View>
 
       <View style={styles.controls}>
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={styles.phaseStrip}
-        >
-          {PHASES.map((phase) => {
-            const marked = activeMarkedPhases.has(phase);
-            return (
+        {trimming ? (
+          <View style={styles.trimPanel}>
+            <Text style={styles.instructionText}>
+              {taggingPhase === "trimming_start"
+                ? "Scrub to the first frame of the swing (Stance), then tap SET STANCE START"
+                : "Scrub to the last frame of the swing (Finish), then tap SET FINISH END"}
+            </Text>
+            <TouchableOpacity
+              activeOpacity={0.85}
+              onPress={taggingPhase === "trimming_start" ? setStanceStart : setFinishEnd}
+              style={styles.primaryAction}
+            >
+              <Text style={styles.primaryActionText}>
+                {taggingPhase === "trimming_start" ? "SET STANCE START" : "SET FINISH END"}
+              </Text>
+            </TouchableOpacity>
+          </View>
+        ) : locked ? (
+          <View style={styles.lockedPanel}>
+            <Text style={styles.lockedText}>{PHASE_LABELS[scrubPhase]}</Text>
+            <TouchableOpacity
+              activeOpacity={0.85}
+              onPress={toggleLock}
+              style={styles.secondaryAction}
+            >
+              <Text style={styles.secondaryActionText}>UNLOCK</Text>
+            </TouchableOpacity>
+          </View>
+        ) : (
+          <>
+            <View style={styles.taggingHeader}>
+              <Text style={styles.taggingText}>
+                {activeSide === "pro" ? "PRO" : "PLAYER"} {activeMarkedPhases.size}/7
+              </Text>
               <TouchableOpacity
-                key={phase}
-                activeOpacity={0.82}
-                onPress={() => markPhase(phase)}
-                disabled={locked}
-                style={[
-                  styles.phasePill,
-                  { borderColor: PHASE_COLORS[phase] },
-                  marked && { backgroundColor: PHASE_COLORS[phase] },
-                  locked && styles.phasePillDisabled,
-                ]}
+                activeOpacity={0.85}
+                onPress={toggleLock}
+                disabled={!canLock}
+                style={[styles.primaryAction, styles.lockSyncAction, !canLock && styles.primaryActionDisabled]}
               >
-                <Text style={[styles.phasePillText, marked && styles.phasePillTextMarked]}>
-                  {PHASE_LABELS[phase]}
+                <Text style={[styles.primaryActionText, !canLock && styles.primaryActionTextDisabled]}>
+                  LOCK SYNC
                 </Text>
               </TouchableOpacity>
-            );
-          })}
-        </ScrollView>
+            </View>
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.phaseStrip}
+            >
+              {PHASES.map((phase) => {
+                const marked = activeMarkedPhases.has(phase);
+                return (
+                  <TouchableOpacity
+                    key={phase}
+                    activeOpacity={0.82}
+                    onPress={() => markPhase(phase)}
+                    style={[
+                      styles.phasePill,
+                      { borderColor: PHASE_COLORS[phase] },
+                      marked && { backgroundColor: PHASE_COLORS[phase] },
+                    ]}
+                  >
+                    <Text style={[styles.phasePillText, marked && styles.phasePillTextMarked]}>
+                      {PHASE_LABELS[phase]}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </ScrollView>
+          </>
+        )}
 
         <GestureDetector gesture={scrubGesture}>
           <Animated.View
             style={styles.scrubberHitbox}
             onLayout={(event) => setTrackWidth(event.nativeEvent.layout.width)}
           >
-            <Animated.View style={[styles.phaseFloatingLabel, floatingLabelStyle]}>
-              <Text style={styles.phaseFloatingText}>
-                {locked
-                  ? PHASE_LABELS[scrubPhase]
-                  : `Frame ${Math.round(scrubProgress * (activeSide === "pro" ? selectedPro.totalFrames : selectedYouth.totalFrames))}`
-                }
-              </Text>
-            </Animated.View>
-
             <View style={styles.track}>
               <Animated.View style={[styles.trackFill, fillStyle]} />
-              {PHASES.map((phase) => (
+              {locked && PHASES.map((phase) => (
                 <View
                   key={phase}
                   pointerEvents="none"
@@ -372,6 +428,27 @@ export default function CompareScreen() {
                   ]}
                 />
               ))}
+              {taggingPhase === "tagging" && PHASES.map((phase) => {
+                const marker = activeSide === "pro" ? proMarkers[phase] : playerMarkers[phase];
+                if (typeof marker !== "number" || swingEnd <= swingStart) {
+                  return null;
+                }
+
+                const markerPosition = (marker - swingStart) / (swingEnd - swingStart);
+                return (
+                  <View
+                    key={phase}
+                    pointerEvents="none"
+                    style={[
+                      styles.phaseTick,
+                      {
+                        left: `${clamp(markerPosition) * 100}%`,
+                        backgroundColor: PHASE_COLORS[phase],
+                      },
+                    ]}
+                  />
+                );
+              })}
             </View>
 
             <Animated.View style={[styles.thumb, thumbStyle]} />
@@ -498,28 +575,6 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: "600",
     marginTop: 3,
-  },
-  lockButton: {
-    alignItems: "center",
-    backgroundColor: ACCENT,
-    borderRadius: 999,
-    minHeight: 42,
-    justifyContent: "center",
-    paddingHorizontal: 18,
-  },
-  lockButtonActive: {
-    backgroundColor: "#f7f8f8",
-  },
-  lockButtonDisabled: {
-    backgroundColor: "rgba(247,248,248,0.12)",
-  },
-  lockButtonText: {
-    color: "#08090a",
-    fontSize: 13,
-    fontWeight: "800",
-  },
-  lockButtonTextActive: {
-    color: "#08090a",
   },
   videoStack: {
     flex: 1,
@@ -664,6 +719,75 @@ const styles = StyleSheet.create({
     paddingBottom: 26,
     paddingTop: 12,
   },
+  trimPanel: {
+    gap: 12,
+    paddingHorizontal: 14,
+  },
+  instructionText: {
+    color: "#f7f8f8",
+    fontSize: 14,
+    fontWeight: "700",
+    lineHeight: 20,
+  },
+  primaryAction: {
+    alignItems: "center",
+    alignSelf: "flex-start",
+    backgroundColor: ACCENT,
+    borderRadius: 8,
+    justifyContent: "center",
+    minHeight: 42,
+    paddingHorizontal: 14,
+  },
+  primaryActionDisabled: {
+    backgroundColor: "rgba(247,248,248,0.12)",
+  },
+  primaryActionText: {
+    color: "#08090a",
+    fontSize: 12,
+    fontWeight: "900",
+  },
+  primaryActionTextDisabled: {
+    color: "rgba(247,248,248,0.42)",
+  },
+  lockedPanel: {
+    alignItems: "center",
+    flexDirection: "row",
+    justifyContent: "space-between",
+    paddingHorizontal: 14,
+  },
+  lockedText: {
+    color: "#f7f8f8",
+    fontSize: 14,
+    fontWeight: "900",
+  },
+  secondaryAction: {
+    alignItems: "center",
+    borderColor: "rgba(247,248,248,0.28)",
+    borderRadius: 8,
+    borderWidth: 1,
+    justifyContent: "center",
+    minHeight: 40,
+    paddingHorizontal: 14,
+  },
+  secondaryActionText: {
+    color: "#f7f8f8",
+    fontSize: 12,
+    fontWeight: "900",
+  },
+  taggingHeader: {
+    alignItems: "center",
+    flexDirection: "row",
+    justifyContent: "space-between",
+    paddingHorizontal: 14,
+  },
+  taggingText: {
+    color: "rgba(247,248,248,0.78)",
+    fontSize: 12,
+    fontWeight: "900",
+  },
+  lockSyncAction: {
+    minHeight: 38,
+  },
   phaseStrip: {
     gap: 8,
     paddingHorizontal: 12,
@@ -678,9 +802,6 @@ const styles = StyleSheet.create({
     minHeight: 40,
     paddingHorizontal: 14,
   },
-  phasePillDisabled: {
-    opacity: 0.72,
-  },
   phasePillText: {
     color: "#f7f8f8",
     fontSize: 13,
@@ -694,22 +815,6 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     marginHorizontal: 14,
     marginTop: 6,
-  },
-  phaseFloatingLabel: {
-    alignItems: "center",
-    backgroundColor: "rgba(247,248,248,0.92)",
-    borderRadius: 999,
-    bottom: 50,
-    justifyContent: "center",
-    minHeight: 28,
-    minWidth: 84,
-    paddingHorizontal: 10,
-    position: "absolute",
-  },
-  phaseFloatingText: {
-    color: "#08090a",
-    fontSize: 12,
-    fontWeight: "900",
   },
   track: {
     backgroundColor: "rgba(247,248,248,0.12)",
