@@ -20,7 +20,6 @@ import {
 } from "../../src/lib/swing-phases";
 
 type Side = "pro" | "player";
-type TaggingPhase = "trimming_start" | "trimming_end" | "tagging" | "locked";
 type ProgressMarkers = Partial<Record<Phase, number>>;
 
 const ACCENT = "#C8F000";
@@ -44,6 +43,10 @@ function clamp(value: number) {
   return Math.min(1, Math.max(0, value));
 }
 
+function frameForVideoProgress(video: SwingVideoInfo, progress: number) {
+  return Math.round(clamp(progress) * Math.max(1, video.totalFrames - 1));
+}
+
 function progressToPhaseMarkers(
   markers: ProgressMarkers,
   video: SwingVideoInfo
@@ -54,7 +57,7 @@ function progressToPhaseMarkers(
 
   return PHASES.reduce((phaseMarkers, phase) => {
     const progress = markers[phase] ?? 0;
-    const frame = Math.round(progress * Math.max(1, video.totalFrames - 1));
+    const frame = frameForVideoProgress(video, progress);
     phaseMarkers[phase] = {
       frame,
       timeMs: (frame / video.fps) * 1000,
@@ -68,19 +71,11 @@ function seekPlayer(video: SwingVideoInfo, player: ReturnType<typeof useVideoPla
   player.currentTime = seconds;
 }
 
-function remapSwingProgress(progress: number, swingStart: number, swingEnd: number) {
-  const start = clamp(swingStart);
-  const end = Math.max(start, clamp(swingEnd));
-  return start + clamp(progress) * (end - start);
-}
-
 export default function CompareScreen() {
   const [selectedProIndex, setSelectedProIndex] = useState(0);
   const [selectedYouthIndex, setSelectedYouthIndex] = useState(0);
-  const [activeSide, setActiveSide] = useState<Side>("player");
-  const [taggingPhase, setTaggingPhase] = useState<TaggingPhase>("trimming_start");
-  const [swingStart, setSwingStart] = useState(0);
-  const [swingEnd, setSwingEnd] = useState(1);
+  const [selectedSide, setSelectedSide] = useState<Side>("player");
+  const [locked, setLocked] = useState(false);
   const [scrubProgress, setScrubProgress] = useState(0);
   const [proFlipped, setProFlipped] = useState(false);
   const [playerFlipped, setPlayerFlipped] = useState(false);
@@ -119,12 +114,11 @@ export default function CompareScreen() {
   );
 
   const canLock = proMarkedPhases.size === PHASES.length && playerMarkedPhases.size === PHASES.length;
-  const locked = taggingPhase === "locked";
-  const trimming = taggingPhase === "trimming_start" || taggingPhase === "trimming_end";
   const scrubPhase = currentPhase(scrubProgress);
-  const activeMarkedPhases = activeSide === "pro" ? proMarkedPhases : playerMarkedPhases;
-  const activeVideo = activeSide === "pro" ? selectedPro : selectedYouth;
-  const activePlayer = activeSide === "pro" ? proPlayer : youthPlayer;
+  const activeMarkedPhases = selectedSide === "pro" ? proMarkedPhases : playerMarkedPhases;
+  const activeMarkers = selectedSide === "pro" ? proMarkers : playerMarkers;
+  const activeVideo = selectedSide === "pro" ? selectedPro : selectedYouth;
+  const activeFrame = frameForVideoProgress(activeVideo, scrubProgress);
 
   const seekLocked = useCallback(
     (nextProgress: number) => {
@@ -142,12 +136,9 @@ export default function CompareScreen() {
     [playerPhaseMarkers, proPhaseMarkers, proPlayer, selectedPro.fps, selectedYouth.fps, youthPlayer]
   );
 
-  const seekFromGesture = useCallback(
-    (nextProgress: number) => {
-      seekToProgressRef.current(nextProgress);
-    },
-    []
-  );
+  const seekFromGesture = useCallback((nextProgress: number) => {
+    seekToProgressRef.current(nextProgress);
+  }, []);
 
   useEffect(() => {
     seekToProgressRef.current = (nextProgress: number) => {
@@ -159,27 +150,30 @@ export default function CompareScreen() {
       }
 
       setScrubProgress(next);
-      const seekProgress =
-        taggingPhase === "tagging" ? remapSwingProgress(next, swingStart, swingEnd) : next;
-
-      if (activeSide === "pro") {
-        seekPlayer(selectedPro, proPlayer, seekProgress);
+      if (selectedSide === "pro") {
+        seekPlayer(selectedPro, proPlayer, next);
       } else {
-        seekPlayer(selectedYouth, youthPlayer, seekProgress);
+        seekPlayer(selectedYouth, youthPlayer, next);
       }
     };
-  }, [activeSide, locked, proPlayer, seekLocked, selectedPro, selectedYouth, swingEnd, swingStart, taggingPhase, youthPlayer]);
+  }, [locked, proPlayer, seekLocked, selectedPro, selectedSide, selectedYouth, youthPlayer]);
 
   useEffect(() => {
     progress.value = 0;
     setScrubProgress(0);
     proPlayer.currentTime = 0;
+    setProMarkers(EMPTY_MARKERS);
+    setProMarkedPhases(new Set());
+    setLocked(false);
   }, [progress, proPlayer, selectedPro.id]);
 
   useEffect(() => {
     progress.value = 0;
     setScrubProgress(0);
     youthPlayer.currentTime = 0;
+    setPlayerMarkers(EMPTY_MARKERS);
+    setPlayerMarkedPhases(new Set());
+    setLocked(false);
   }, [progress, selectedYouth.id, youthPlayer]);
 
   useEffect(() => {
@@ -192,17 +186,16 @@ export default function CompareScreen() {
         return;
       }
 
-      const nextProgress = remapSwingProgress(scrubProgress, swingStart, swingEnd);
-      if (activeSide === "pro") {
-        setProMarkers((previous) => ({ ...previous, [phase]: nextProgress }));
+      if (selectedSide === "pro") {
+        setProMarkers((previous) => ({ ...previous, [phase]: scrubProgress }));
         setProMarkedPhases((previous) => new Set(previous).add(phase));
         return;
       }
 
-      setPlayerMarkers((previous) => ({ ...previous, [phase]: nextProgress }));
+      setPlayerMarkers((previous) => ({ ...previous, [phase]: scrubProgress }));
       setPlayerMarkedPhases((previous) => new Set(previous).add(phase));
     },
-    [activeSide, locked, scrubProgress, swingEnd, swingStart]
+    [locked, scrubProgress, selectedSide]
   );
 
   const toggleLock = useCallback(() => {
@@ -211,28 +204,11 @@ export default function CompareScreen() {
     }
 
     const nextLocked = !locked;
-    setTaggingPhase(nextLocked ? "locked" : "tagging");
-    if (!nextLocked) {
-      return;
+    setLocked(nextLocked);
+    if (nextLocked) {
+      seekLocked(scrubProgress);
     }
-    seekLocked(scrubProgress);
   }, [canLock, locked, scrubProgress, seekLocked]);
-
-  const setStanceStart = useCallback(() => {
-    const nextStart = clamp(scrubProgress);
-    setSwingStart(nextStart);
-    setSwingEnd((previousEnd) => Math.max(nextStart, previousEnd));
-    setTaggingPhase("trimming_end");
-  }, [scrubProgress]);
-
-  const setFinishEnd = useCallback(() => {
-    const nextEnd = Math.max(swingStart, clamp(scrubProgress));
-    setSwingEnd(nextEnd);
-    setScrubProgress(0);
-    progress.value = 0;
-    seekPlayer(activeVideo, activePlayer, swingStart);
-    setTaggingPhase("tagging");
-  }, [activePlayer, activeVideo, progress, scrubProgress, swingStart]);
 
   const scrubGesture = useMemo(
     () =>
@@ -295,22 +271,18 @@ export default function CompareScreen() {
             Swing<Text style={styles.logoDim}>Lab</Text>
           </Text>
           <Text style={styles.subtitle}>
-            {locked
-              ? "Phase sync locked"
-              : trimming
-                ? "Set swing trim range"
-                : `Tagging ${activeSide === "pro" ? "pro" : "player"} phases`}
+            {locked ? "Phase sync locked" : `Tagging ${selectedSide === "pro" ? "pro" : "player"} phases`}
           </Text>
         </View>
       </View>
 
       <View style={styles.videoStack}>
         <VideoPanel
-          active={activeSide === "pro"}
+          active={selectedSide === "pro"}
           flipped={proFlipped}
           markedCount={proMarkedPhases.size}
           onFlip={() => setProFlipped((value) => !value)}
-          onPress={() => !locked && setActiveSide("pro")}
+          onPress={() => !locked && setSelectedSide("pro")}
           onSelectVideo={setSelectedProIndex}
           player={proPlayer}
           selectedIndex={selectedProIndex}
@@ -319,12 +291,14 @@ export default function CompareScreen() {
           videos={PRO_SWINGS}
         />
 
+        <View style={styles.videoDivider} />
+
         <VideoPanel
-          active={activeSide === "player"}
+          active={selectedSide === "player"}
           flipped={playerFlipped}
           markedCount={playerMarkedPhases.size}
           onFlip={() => setPlayerFlipped((value) => !value)}
-          onPress={() => !locked && setActiveSide("player")}
+          onPress={() => !locked && setSelectedSide("player")}
           onSelectVideo={setSelectedYouthIndex}
           player={youthPlayer}
           selectedIndex={selectedYouthIndex}
@@ -335,24 +309,7 @@ export default function CompareScreen() {
       </View>
 
       <View style={styles.controls}>
-        {trimming ? (
-          <View style={styles.trimPanel}>
-            <Text style={styles.instructionText}>
-              {taggingPhase === "trimming_start"
-                ? "Scrub to the first frame of the swing (Stance), then tap SET STANCE START"
-                : "Scrub to the last frame of the swing (Finish), then tap SET FINISH END"}
-            </Text>
-            <TouchableOpacity
-              activeOpacity={0.85}
-              onPress={taggingPhase === "trimming_start" ? setStanceStart : setFinishEnd}
-              style={styles.primaryAction}
-            >
-              <Text style={styles.primaryActionText}>
-                {taggingPhase === "trimming_start" ? "SET STANCE START" : "SET FINISH END"}
-              </Text>
-            </TouchableOpacity>
-          </View>
-        ) : locked ? (
+        {locked ? (
           <View style={styles.lockedPanel}>
             <Text style={styles.lockedText}>{PHASE_LABELS[scrubPhase]}</Text>
             <TouchableOpacity
@@ -367,13 +324,14 @@ export default function CompareScreen() {
           <>
             <View style={styles.taggingHeader}>
               <Text style={styles.taggingText}>
-                {activeSide === "pro" ? "PRO" : "PLAYER"} {activeMarkedPhases.size}/7
+                {selectedSide === "pro" ? "PRO" : "PLAYER"} {activeMarkedPhases.size}/7
               </Text>
+              <Text style={styles.frameText}>FRAME {activeFrame}</Text>
               <TouchableOpacity
                 activeOpacity={0.85}
                 onPress={toggleLock}
                 disabled={!canLock}
-                style={[styles.primaryAction, styles.lockSyncAction, !canLock && styles.primaryActionDisabled]}
+                style={[styles.primaryAction, !canLock && styles.primaryActionDisabled]}
               >
                 <Text style={[styles.primaryActionText, !canLock && styles.primaryActionTextDisabled]}>
                   LOCK SYNC
@@ -428,13 +386,12 @@ export default function CompareScreen() {
                   ]}
                 />
               ))}
-              {taggingPhase === "tagging" && PHASES.map((phase) => {
-                const marker = activeSide === "pro" ? proMarkers[phase] : playerMarkers[phase];
-                if (typeof marker !== "number" || swingEnd <= swingStart) {
+              {!locked && PHASES.map((phase) => {
+                const marker = activeMarkers[phase];
+                if (typeof marker !== "number") {
                   return null;
                 }
 
-                const markerPosition = (marker - swingStart) / (swingEnd - swingStart);
                 return (
                   <View
                     key={phase}
@@ -442,7 +399,7 @@ export default function CompareScreen() {
                     style={[
                       styles.phaseTick,
                       {
-                        left: `${clamp(markerPosition) * 100}%`,
+                        left: `${clamp(marker) * 100}%`,
                         backgroundColor: PHASE_COLORS[phase],
                       },
                     ]}
@@ -488,7 +445,7 @@ function VideoPanel({
     <TouchableOpacity
       activeOpacity={0.95}
       onPress={onPress}
-      style={[styles.videoPanel, active ? styles.videoPanelActive : styles.videoPanelInactive]}
+      style={[styles.videoPanel, !active && styles.videoPanelInactive]}
     >
       <View style={[styles.videoMirrorLayer, flipped && styles.videoFlipped]}>
         <VideoView
@@ -506,7 +463,9 @@ function VideoPanel({
           <View style={styles.sideBadge}>
             <Text style={styles.sideBadgeText}>{sideLabel}</Text>
           </View>
-          <Text style={styles.videoName} numberOfLines={1}>{video.label}</Text>
+          <View style={styles.videoNameBadge}>
+            <Text style={styles.videoName} numberOfLines={1}>{video.label}</Text>
+          </View>
         </View>
 
         <View style={styles.headerActions}>
@@ -543,6 +502,8 @@ function VideoPanel({
           ))}
         </ScrollView>
       </View>
+
+      {active && <View pointerEvents="none" style={styles.activeVideoBar} />}
     </TouchableOpacity>
   );
 }
@@ -578,23 +539,26 @@ const styles = StyleSheet.create({
   },
   videoStack: {
     flex: 1,
-    gap: 10,
-    paddingHorizontal: 10,
+  },
+  videoDivider: {
+    backgroundColor: "rgba(247,248,248,0.16)",
+    height: 1,
   },
   videoPanel: {
     backgroundColor: "#111315",
-    borderColor: "rgba(247,248,248,0.08)",
-    borderRadius: 8,
-    borderWidth: 2,
     flex: 1,
     overflow: "hidden",
   },
-  videoPanelActive: {
-    borderColor: ACCENT,
-  },
   videoPanelInactive: {
-    borderColor: "rgba(247,248,248,0.05)",
     opacity: 0.4,
+  },
+  activeVideoBar: {
+    backgroundColor: ACCENT,
+    bottom: 0,
+    height: 3,
+    left: 0,
+    position: "absolute",
+    right: 0,
   },
   videoMirrorLayer: {
     ...StyleSheet.absoluteFillObject,
@@ -618,35 +582,34 @@ const styles = StyleSheet.create({
   },
   videoLabelStack: {
     alignItems: "flex-start",
-    flex: 1,
-    gap: 5,
-    minWidth: 0,
+    flexShrink: 1,
+    gap: 4,
+    maxWidth: "62%",
   },
   sideBadge: {
     alignItems: "center",
     backgroundColor: ACCENT,
-    borderRadius: 6,
+    borderRadius: 5,
     justifyContent: "center",
     minHeight: 24,
-    paddingHorizontal: 9,
+    paddingHorizontal: 10,
   },
   sideBadgeText: {
     color: "#08090a",
     fontSize: 10,
     fontWeight: "900",
   },
+  videoNameBadge: {
+    backgroundColor: "rgba(8,9,10,0.68)",
+    borderRadius: 5,
+    maxWidth: "100%",
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
   videoName: {
-    backgroundColor: "rgba(8,9,10,0.58)",
-    borderColor: "rgba(247,248,248,0.14)",
-    borderRadius: 6,
-    borderWidth: 1,
     color: "#f7f8f8",
     fontSize: 12,
     fontWeight: "800",
-    maxWidth: "100%",
-    overflow: "hidden",
-    paddingHorizontal: 9,
-    paddingVertical: 5,
   },
   headerActions: {
     flexDirection: "row",
@@ -655,7 +618,7 @@ const styles = StyleSheet.create({
   },
   iconBadge: {
     alignItems: "center",
-    backgroundColor: "rgba(8,9,10,0.58)",
+    backgroundColor: "rgba(8,9,10,0.62)",
     borderColor: "rgba(247,248,248,0.18)",
     borderRadius: 8,
     borderWidth: 1,
@@ -698,9 +661,9 @@ const styles = StyleSheet.create({
     borderColor: "rgba(247,248,248,0.14)",
     borderRadius: 999,
     borderWidth: 1,
+    justifyContent: "center",
     maxWidth: 150,
     minHeight: 34,
-    justifyContent: "center",
     paddingHorizontal: 12,
   },
   videoChoiceActive: {
@@ -719,23 +682,12 @@ const styles = StyleSheet.create({
     paddingBottom: 26,
     paddingTop: 12,
   },
-  trimPanel: {
-    gap: 12,
-    paddingHorizontal: 14,
-  },
-  instructionText: {
-    color: "#f7f8f8",
-    fontSize: 14,
-    fontWeight: "700",
-    lineHeight: 20,
-  },
   primaryAction: {
     alignItems: "center",
-    alignSelf: "flex-start",
     backgroundColor: ACCENT,
     borderRadius: 8,
     justifyContent: "center",
-    minHeight: 42,
+    minHeight: 38,
     paddingHorizontal: 14,
   },
   primaryActionDisabled: {
@@ -777,6 +729,7 @@ const styles = StyleSheet.create({
   taggingHeader: {
     alignItems: "center",
     flexDirection: "row",
+    gap: 10,
     justifyContent: "space-between",
     paddingHorizontal: 14,
   },
@@ -785,8 +738,12 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: "900",
   },
-  lockSyncAction: {
-    minHeight: 38,
+  frameText: {
+    color: "#f7f8f8",
+    flex: 1,
+    fontSize: 12,
+    fontWeight: "900",
+    textAlign: "center",
   },
   phaseStrip: {
     gap: 8,
